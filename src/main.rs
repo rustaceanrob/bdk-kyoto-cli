@@ -1,9 +1,11 @@
+#![allow(unused)]
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Mutex;
+use tokio::runtime::Handle;
 use tokio::task;
 use tokio::time;
 
-use bdk_wallet::bitcoin::{constants, Network};
+use bdk_wallet::bitcoin::{constants, BlockHash, Network, Transaction};
 
 use bdk_wallet::chain::{
     collections::HashSet,
@@ -20,7 +22,7 @@ use example_cli::{
 
 use kyoto::chain::checkpoints::HeaderCheckpoint;
 use kyoto::node::builder::NodeBuilder;
-use kyoto::BlockHash;
+use kyoto::{TxBroadcast, TxBroadcastPolicy};
 
 type ChangeSet = (
     local_chain::ChangeSet,
@@ -74,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     } = example_cli::init::<Cmd, Arg, ChangeSet>(DB_MAGIC, DB_PATH)?;
 
     let (init_chain_changeset, init_indexed_tx_graph_changeset) = init_changeset;
+    let network = args.network;
 
     let (graph, anchor_heights) = {
         let mut graph = IndexedTxGraph::new(index);
@@ -95,17 +98,59 @@ async fn main() -> anyhow::Result<()> {
         (Mutex::new(chain), heights)
     };
 
+    let broadcast_fn = |_, tx: &Transaction| -> anyhow::Result<()> {
+        let mut builder = NodeBuilder::new(network);
+        let (mut node, mut client) = Handle::current().block_on(async move {
+            builder
+                .add_peers(
+                    PEERS
+                        .iter()
+                        .cloned()
+                        .map(|ip| (ip, Some(PORT)).into())
+                        .collect(),
+                )
+                .num_required_peers(2)
+                .build_node()
+                .await
+        });
+
+        let (mut sender, _) = client.split();
+
+        task::spawn(async move { node.run().await });
+
+        let mut cloned_sender = sender.clone();
+
+        Handle::current().block_on(async move {
+            cloned_sender
+                .broadcast_tx(TxBroadcast {
+                    tx: tx.clone(),
+                    broadcast_policy: TxBroadcastPolicy::AllPeers,
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to broadcast tx: {e:?}"));
+        });
+
+        Handle::current().block_on(async move {
+            sender
+                .shutdown()
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to shutdown node {e:?}"));
+        });
+
+        Ok(())
+    };
+
     let cmd = match &args.command {
         example_cli::Commands::ChainSpecific(cmd) => cmd,
-        general_cmd => {
+        cmd => {
             return example_cli::handle_commands(
                 &graph,
                 &db,
                 &chain,
                 &keymap,
                 args.network,
-                |_, _tx| unimplemented!(),
-                general_cmd.clone(),
+                broadcast_fn,
+                cmd.clone(),
             );
         }
     };
@@ -145,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Anchored to block {} {}", header_cp.height, header_cp.hash);
 
             // Configure kyoto node
-            let builder = NodeBuilder::new(Network::Signet);
+            let builder = NodeBuilder::new(network);
             let (mut node, client) = builder
                 .add_peers(
                     PEERS
