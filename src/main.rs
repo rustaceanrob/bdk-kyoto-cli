@@ -75,11 +75,17 @@ async fn main() -> anyhow::Result<()> {
 
     let (init_chain_changeset, init_indexed_tx_graph_changeset) = init_changeset;
 
-    let graph = Mutex::new({
+    let (graph, anchor_heights) = {
         let mut graph = IndexedTxGraph::new(index);
         graph.apply_changeset(init_indexed_tx_graph_changeset);
-        graph
-    });
+        let heights: HashSet<_> = graph
+            .graph()
+            .all_anchors()
+            .iter()
+            .map(|(a, _)| a.confirmation_height)
+            .collect();
+        (Mutex::new(graph), heights)
+    };
 
     let (chain, local_heights) = {
         let g = constants::genesis_block(args.network).block_hash();
@@ -201,10 +207,14 @@ async fn main() -> anyhow::Result<()> {
             .graph()
             .balance(&*chain, cp.block_id(), outpoints, |_, _| true)
     );
-    let new_heights: HashSet<_> = chain.iter_checkpoints().map(|cp| cp.height()).collect();
+    let update_heights: HashSet<_> = chain.iter_checkpoints().map(|cp| cp.height()).collect();
     assert!(
-        new_heights.is_superset(&local_heights),
-        "all heights in original chain must be present"
+        update_heights.is_superset(&local_heights),
+        "all heights in original chain must be present after update"
+    );
+    assert!(
+        update_heights.is_superset(&anchor_heights),
+        "all anchor heights must be present after update"
     );
 
     Ok(())
