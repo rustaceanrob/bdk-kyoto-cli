@@ -53,11 +53,11 @@ enum Cmd {
 #[derive(Args, Debug, Clone)]
 struct Arg {
     /// Start height
-    #[clap(env = "START_HEIGHT")]
-    height: u32,
+    #[clap(long)]
+    height: Option<u32>,
     /// Start hash
-    #[clap(env = "START_HASH")]
-    hash: BlockHash,
+    #[clap(long)]
+    hash: Option<BlockHash>,
 }
 
 #[tokio::main]
@@ -126,15 +126,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                // Begin sync from at least the specified wallet birthday
-                // or else the last local checkpoint
+                // Begin sync from a specified wallet birthday or else
+                // the last local checkpoint
                 let cp = chain.tip();
-                if cp.height() < args.height {
-                    HeaderCheckpoint::new(args.height, args.hash)
-                } else {
-                    HeaderCheckpoint::new(cp.height(), cp.hash())
+                match (args.height, args.hash) {
+                    (Some(height), Some(hash)) => HeaderCheckpoint::new(height, hash),
+                    (None, None) => HeaderCheckpoint::new(cp.height(), cp.hash()),
+                    _ => anyhow::bail!("missing one of --height or --hash"),
                 }
             };
+
+            tracing::info!("Anchored to block {} {}", header_cp.height, header_cp.hash);
 
             // Configure kyoto node
             let builder = NodeBuilder::new(Network::Signet);
