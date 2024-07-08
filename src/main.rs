@@ -1,11 +1,10 @@
-#![allow(unused)]
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Mutex;
 use tokio::runtime::Handle;
 use tokio::task;
 use tokio::time;
 
-use bdk_wallet::bitcoin::{constants, BlockHash, Network, Transaction};
+use bdk_wallet::bitcoin::{constants, BlockHash, Transaction};
 
 use bdk_wallet::chain::{
     collections::HashSet,
@@ -17,7 +16,7 @@ use bdk_wallet::chain::{
 
 use example_cli::{
     clap::{self, Args, Subcommand},
-    Keychain,
+    handle_commands, Commands, Keychain,
 };
 
 use kyoto::chain::checkpoints::HeaderCheckpoint;
@@ -99,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let broadcast_fn = |_, tx: &Transaction| -> anyhow::Result<()> {
-        let mut builder = NodeBuilder::new(network);
+        let builder = NodeBuilder::new(network);
         let (mut node, mut client) = Handle::current().block_on(async move {
             builder
                 .add_peers(
@@ -118,149 +117,148 @@ async fn main() -> anyhow::Result<()> {
 
         task::spawn(async move { node.run().await });
 
-        let mut cloned_sender = sender.clone();
-
+        let mut clone = sender.clone();
         Handle::current().block_on(async move {
-            cloned_sender
+            clone
                 .broadcast_tx(TxBroadcast {
                     tx: tx.clone(),
                     broadcast_policy: TxBroadcastPolicy::AllPeers,
                 })
                 .await
-                .map_err(|e| anyhow::anyhow!("failed to broadcast tx: {e:?}"));
+                .unwrap();
         });
-
         Handle::current().block_on(async move {
-            sender
-                .shutdown()
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to shutdown node {e:?}"));
+            sender.shutdown().await.unwrap();
         });
 
         Ok(())
     };
 
-    let cmd = match &args.command {
-        example_cli::Commands::ChainSpecific(cmd) => cmd,
-        cmd => {
-            return example_cli::handle_commands(
-                &graph,
-                &db,
-                &chain,
-                &keymap,
-                args.network,
-                broadcast_fn,
-                cmd.clone(),
-            );
-        }
-    };
+    // execute a general command, i.e. not a chain specific cmd
+    if !matches!(args.command, Commands::ChainSpecific(_)) {
+        let _ = handle_commands(
+            &graph,
+            &db,
+            &chain,
+            &keymap,
+            args.network,
+            broadcast_fn,
+            args.command.clone(),
+        );
+
+        return Ok(());
+    }
 
     let now = time::Instant::now();
 
-    match cmd {
-        Cmd::Sync { args } => {
-            let mut spks = HashSet::new();
+    match args.command {
+        Commands::ChainSpecific(cmd) => {
+            match cmd {
+                Cmd::Sync { args } => {
+                    let mut spks = HashSet::new();
 
-            let header_cp = {
-                let chain = chain.lock().unwrap();
-                let graph = graph.lock().unwrap();
+                    let header_cp = {
+                        let chain = chain.lock().unwrap();
+                        let graph = graph.lock().unwrap();
 
-                // Populate list of watched SPKs
-                let indexer = &graph.index;
-                for (keychain, _) in indexer.keychains() {
-                    let last_reveal = indexer
-                        .last_revealed_index(keychain)
-                        .unwrap_or(TARGET_INDEX);
-                    for index in 0..=last_reveal {
-                        let spk = graph.index.spk_at_index(*keychain, index).unwrap();
-                        spks.insert(spk.to_owned());
+                        // Populate list of watched SPKs
+                        let indexer = &graph.index;
+                        for (keychain, _) in indexer.keychains() {
+                            let last_reveal = indexer
+                                .last_revealed_index(keychain)
+                                .unwrap_or(TARGET_INDEX);
+                            for index in 0..=last_reveal {
+                                let spk = graph.index.spk_at_index(*keychain, index).unwrap();
+                                spks.insert(spk.to_owned());
+                            }
+                        }
+
+                        // Begin sync from a specified wallet birthday or else
+                        // the last local checkpoint
+                        let cp = chain.tip();
+                        match (args.height, args.hash) {
+                            (Some(height), Some(hash)) => HeaderCheckpoint::new(height, hash),
+                            (None, None) => HeaderCheckpoint::new(cp.height(), cp.hash()),
+                            _ => anyhow::bail!("missing one of --height or --hash"),
+                        }
+                    };
+
+                    tracing::info!("Anchored at block {} {}", header_cp.height, header_cp.hash);
+
+                    // Configure kyoto node
+                    let builder = NodeBuilder::new(network);
+                    let (mut node, client) = builder
+                        .add_peers(
+                            PEERS
+                                .iter()
+                                .cloned()
+                                .map(|ip| (ip, Some(PORT)).into())
+                                .collect(),
+                        )
+                        .add_scripts(spks)
+                        .anchor_checkpoint(header_cp)
+                        .num_required_peers(2)
+                        .build_node()
+                        .await;
+
+                    let mut client = {
+                        let chain = chain.lock().unwrap();
+                        let graph = graph.lock().unwrap();
+
+                        let req = bdk_kyoto::Request::new(chain.tip(), &graph.index);
+                        req.into_client(client)
+                    };
+
+                    // Run the node
+                    task::spawn(async move { node.run().await });
+
+                    // Sync and apply updates
+                    if let Some(bdk_kyoto::Update {
+                        cp,
+                        indexed_tx_graph,
+                    }) = client.update().await
+                    {
+                        let mut chain = chain.lock().unwrap();
+                        let mut graph = graph.lock().unwrap();
+                        let mut db = db.lock().unwrap();
+
+                        let chain_changeset = chain.apply_update(cp)?;
+                        let graph_changeset = indexed_tx_graph.initial_changeset();
+                        graph.apply_changeset(graph_changeset.clone());
+                        db.append_changeset(&(chain_changeset, graph_changeset))?;
                     }
+
+                    client.shutdown().await?;
+
+                    let elapsed = now.elapsed();
+                    tracing::info!("Duration: {}s", elapsed.as_secs_f32());
+
+                    let chain = chain.lock().unwrap();
+                    let graph = graph.lock().unwrap();
+                    let cp = chain.tip();
+                    tracing::info!("Local tip: {} {}", cp.height(), cp.hash());
+                    let outpoints = graph.index.outpoints().clone();
+                    tracing::info!(
+                        "Balance: {:#?}",
+                        graph
+                            .graph()
+                            .balance(&*chain, cp.block_id(), outpoints, |_, _| true)
+                    );
+                    let update_heights: HashSet<_> =
+                        chain.iter_checkpoints().map(|cp| cp.height()).collect();
+                    assert!(
+                        update_heights.is_superset(&local_heights),
+                        "all heights in original chain must be present after update"
+                    );
+                    assert!(
+                        update_heights.is_superset(&anchor_heights),
+                        "all anchor heights must be present after update"
+                    );
                 }
-
-                // Begin sync from a specified wallet birthday or else
-                // the last local checkpoint
-                let cp = chain.tip();
-                match (args.height, args.hash) {
-                    (Some(height), Some(hash)) => HeaderCheckpoint::new(height, hash),
-                    (None, None) => HeaderCheckpoint::new(cp.height(), cp.hash()),
-                    _ => anyhow::bail!("missing one of --height or --hash"),
-                }
-            };
-
-            tracing::info!("Anchored to block {} {}", header_cp.height, header_cp.hash);
-
-            // Configure kyoto node
-            let builder = NodeBuilder::new(network);
-            let (mut node, client) = builder
-                .add_peers(
-                    PEERS
-                        .iter()
-                        .cloned()
-                        .map(|ip| (ip, Some(PORT)).into())
-                        .collect(),
-                )
-                .add_scripts(spks)
-                .anchor_checkpoint(header_cp)
-                .num_required_peers(2)
-                .build_node()
-                .await;
-
-            let mut client = {
-                let chain = chain.lock().unwrap();
-                let graph = graph.lock().unwrap();
-
-                let req = bdk_kyoto::Request::new(chain.tip(), &graph.index);
-                req.into_client(client)
-            };
-
-            // Run the `Node`
-            if !node.is_running() {
-                task::spawn(async move { node.run().await });
             }
-
-            // Sync and apply updates
-            if let Some(bdk_kyoto::Update {
-                cp,
-                indexed_tx_graph,
-            }) = client.update().await
-            {
-                let mut chain = chain.lock().unwrap();
-                let mut graph = graph.lock().unwrap();
-                let mut db = db.lock().unwrap();
-
-                let chain_changeset = chain.apply_update(cp)?;
-                let graph_changeset = indexed_tx_graph.initial_changeset();
-                graph.apply_changeset(graph_changeset.clone());
-                db.append_changeset(&(chain_changeset, graph_changeset))?;
-            }
-
-            client.shutdown().await?;
         }
+        _ => unreachable!("handled above"),
     }
-
-    let elapsed = now.elapsed();
-    tracing::info!("Duration: {}s", elapsed.as_secs_f32());
-
-    let chain = chain.lock().unwrap();
-    let graph = graph.lock().unwrap();
-    let cp = chain.tip();
-    tracing::info!("Local tip: {} {}", cp.height(), cp.hash());
-    let outpoints = graph.index.outpoints().clone();
-    tracing::info!(
-        "Balance: {:#?}",
-        graph
-            .graph()
-            .balance(&*chain, cp.block_id(), outpoints, |_, _| true)
-    );
-    let update_heights: HashSet<_> = chain.iter_checkpoints().map(|cp| cp.height()).collect();
-    assert!(
-        update_heights.is_superset(&local_heights),
-        "all heights in original chain must be present after update"
-    );
-    assert!(
-        update_heights.is_superset(&anchor_heights),
-        "all anchor heights must be present after update"
-    );
 
     Ok(())
 }
