@@ -4,9 +4,9 @@ use tokio::runtime::Handle;
 use tokio::task;
 use tokio::time;
 
-use bdk_wallet::bitcoin::{constants, BlockHash, Transaction};
+use bdk_chain::bitcoin::{constants, BlockHash, Transaction};
 
-use bdk_wallet::chain::{
+use bdk_chain::{
     collections::HashSet,
     indexed_tx_graph::{self, IndexedTxGraph},
     keychain,
@@ -19,9 +19,9 @@ use example_cli::{
     handle_commands, Commands, Keychain,
 };
 
-use kyoto::chain::checkpoints::HeaderCheckpoint;
-use kyoto::node::builder::NodeBuilder;
-use kyoto::{TxBroadcast, TxBroadcastPolicy};
+use bdk_kyoto::chain::checkpoints::HeaderCheckpoint;
+use bdk_kyoto::node::builder::NodeBuilder;
+use bdk_kyoto::{TxBroadcast, TxBroadcastPolicy};
 
 type ChangeSet = (
     local_chain::ChangeSet,
@@ -99,27 +99,24 @@ async fn main() -> anyhow::Result<()> {
 
     let broadcast_fn = |_, tx: &Transaction| -> anyhow::Result<()> {
         let builder = NodeBuilder::new(network);
-        let (mut node, mut client) = Handle::current().block_on(async move {
-            builder
-                .add_peers(
-                    PEERS
-                        .iter()
-                        .cloned()
-                        .map(|ip| (ip, Some(PORT)).into())
-                        .collect(),
-                )
-                .num_required_peers(2)
-                .build_node()
-                .await
-        });
+        let (mut node, client) = builder
+            .add_peers(
+                PEERS
+                    .iter()
+                    .cloned()
+                    .map(|ip| (ip, Some(PORT)).into())
+                    .collect(),
+            )
+            .num_required_peers(2)
+            .build_node();
 
-        let (mut sender, _) = client.split();
+        let (sender, _) = client.split();
 
         task::spawn(async move { node.run().await });
 
-        let mut clone = sender.clone();
+        let sender_clone = sender.clone();
         Handle::current().block_on(async move {
-            clone
+            sender_clone
                 .broadcast_tx(TxBroadcast {
                     tx: tx.clone(),
                     broadcast_policy: TxBroadcastPolicy::AllPeers,
@@ -198,8 +195,7 @@ async fn main() -> anyhow::Result<()> {
                         .add_scripts(spks)
                         .anchor_checkpoint(header_cp)
                         .num_required_peers(2)
-                        .build_node()
-                        .await;
+                        .build_node();
 
                     let mut client = {
                         let chain = chain.lock().unwrap();
