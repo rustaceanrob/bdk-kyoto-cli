@@ -11,7 +11,8 @@ use bdk_chain::{
     indexed_tx_graph::{self, IndexedTxGraph},
     keychain,
     local_chain::{self, LocalChain},
-    ConfirmationTimeHeightAnchor,
+    spk_client::FullScanResult,
+    Append, ConfirmationTimeHeightAnchor,
 };
 
 use example_cli::{
@@ -20,6 +21,7 @@ use example_cli::{
 };
 
 use bdk_kyoto::chain::checkpoints::HeaderCheckpoint;
+use bdk_kyoto::logger::TraceLogger;
 use bdk_kyoto::node::builder::NodeBuilder;
 use bdk_kyoto::{TxBroadcast, TxBroadcastPolicy};
 
@@ -201,27 +203,35 @@ async fn main() -> anyhow::Result<()> {
                         let chain = chain.lock().unwrap();
                         let graph = graph.lock().unwrap();
 
-                        let req = bdk_kyoto::Request::new(chain.tip(), &graph.index);
-                        req.into_client(client)
+                        let mut client =
+                            bdk_kyoto::Client::from_index(chain.tip(), &graph.index, client);
+                        let logger = TraceLogger::new();
+                        client.set_logger(Box::new(logger));
+                        client
                     };
 
                     // Run the node
                     task::spawn(async move { node.run().await });
 
                     // Sync and apply updates
-                    if let Some(bdk_kyoto::Update {
-                        cp,
-                        indexed_tx_graph,
-                    }) = client.update().await
-                    {
+                    if let Some(res) = client.update().await {
+                        let FullScanResult {
+                            chain_update,
+                            graph_update,
+                            last_active_indices,
+                        } = res;
+
                         let mut chain = chain.lock().unwrap();
                         let mut graph = graph.lock().unwrap();
                         let mut db = db.lock().unwrap();
 
-                        let chain_changeset = chain.apply_update(cp)?;
-                        let graph_changeset = indexed_tx_graph.initial_changeset();
-                        graph.apply_changeset(graph_changeset.clone());
-                        db.append_changeset(&(chain_changeset, graph_changeset))?;
+                        let chain_changeset = chain.apply_update(chain_update)?;
+                        let index_changeset =
+                            graph.index.reveal_to_target_multi(&last_active_indices);
+                        let mut indexed_graph_changeset = graph.apply_update(graph_update);
+                        indexed_graph_changeset.append(index_changeset.into());
+
+                        db.append_changeset(&(chain_changeset, indexed_graph_changeset))?;
                     }
 
                     client.shutdown().await?;
@@ -231,15 +241,24 @@ async fn main() -> anyhow::Result<()> {
 
                     let chain = chain.lock().unwrap();
                     let graph = graph.lock().unwrap();
+                    let index = &graph.index;
                     let cp = chain.tip();
                     tracing::info!("Local tip: {} {}", cp.height(), cp.hash());
-                    let outpoints = graph.index.outpoints().clone();
-                    tracing::info!(
-                        "Balance: {:#?}",
+                    for (keychain, index) in index.last_revealed_indices() {
+                        tracing::info!("Last revealed {keychain:?}: {index}");
+                    }
+                    let outpoints = index.outpoints().clone();
+                    let balance =
                         graph
                             .graph()
-                            .balance(&*chain, cp.block_id(), outpoints, |_, _| true)
+                            .balance(&*chain, cp.block_id(), outpoints, |_, _| true);
+                    tracing::info!("immature: {} sats", balance.immature.to_sat());
+                    tracing::info!("trusted_pending: {} sats", balance.trusted_pending.to_sat());
+                    tracing::info!(
+                        "untrusted_pending: {} sats",
+                        balance.untrusted_pending.to_sat()
                     );
+                    tracing::info!("confirmed: {} sats", balance.confirmed.to_sat());
                     let update_heights: HashSet<_> =
                         chain.iter_checkpoints().map(|cp| cp.height()).collect();
                     assert!(
