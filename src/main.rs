@@ -20,10 +20,9 @@ use example_cli::{
     handle_commands, Commands, Keychain,
 };
 
-use bdk_kyoto::chain::checkpoints::HeaderCheckpoint;
-use bdk_kyoto::logger::TraceLogger;
+use bdk_kyoto::logger::PrintLogger;
 use bdk_kyoto::node::builder::NodeBuilder;
-use bdk_kyoto::{TxBroadcast, TxBroadcastPolicy};
+use bdk_kyoto::{HeaderCheckpoint, TxBroadcast, TxBroadcastPolicy};
 
 type ChangeSet = (
     local_chain::ChangeSet,
@@ -65,9 +64,6 @@ struct Arg {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let subscriber = tracing_subscriber::FmtSubscriber::new();
-    tracing::subscriber::set_global_default(subscriber)?;
-
     let example_cli::Init {
         args,
         keymap,
@@ -182,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                     };
 
-                    tracing::info!("Anchored at block {} {}", header_cp.height, header_cp.hash);
+                    println!("Anchored at block {} {}", header_cp.height, header_cp.hash);
 
                     // Configure kyoto node
                     let builder = NodeBuilder::new(network);
@@ -205,8 +201,7 @@ async fn main() -> anyhow::Result<()> {
 
                         let mut client =
                             bdk_kyoto::Client::from_index(chain.tip(), &graph.index, client);
-                        let logger = TraceLogger::new();
-                        client.set_logger(Box::new(logger));
+                        client.set_logger(Box::new(PrintLogger::new()));
                         client
                     };
 
@@ -237,28 +232,28 @@ async fn main() -> anyhow::Result<()> {
                     client.shutdown().await?;
 
                     let elapsed = now.elapsed();
-                    tracing::info!("Duration: {}s", elapsed.as_secs_f32());
+                    println!("Duration: {}s", elapsed.as_secs_f32());
 
                     let chain = chain.lock().unwrap();
                     let graph = graph.lock().unwrap();
                     let index = &graph.index;
                     let cp = chain.tip();
-                    tracing::info!("Local tip: {} {}", cp.height(), cp.hash());
+                    println!("Local tip: {} {}", cp.height(), cp.hash());
                     for (keychain, index) in index.last_revealed_indices() {
-                        tracing::info!("Last revealed {keychain:?}: {index}");
+                        println!("Last revealed {keychain:?}: {index}");
                     }
                     let outpoints = index.outpoints().clone();
                     let balance =
                         graph
                             .graph()
                             .balance(&*chain, cp.block_id(), outpoints, |_, _| true);
-                    tracing::info!("immature: {} sats", balance.immature.to_sat());
-                    tracing::info!("trusted_pending: {} sats", balance.trusted_pending.to_sat());
-                    tracing::info!(
+                    println!("immature: {} sats", balance.immature.to_sat());
+                    println!("trusted_pending: {} sats", balance.trusted_pending.to_sat());
+                    println!(
                         "untrusted_pending: {} sats",
                         balance.untrusted_pending.to_sat()
                     );
-                    tracing::info!("confirmed: {} sats", balance.confirmed.to_sat());
+                    println!("confirmed: {} sats", balance.confirmed.to_sat());
                     let update_heights: HashSet<_> =
                         chain.iter_checkpoints().map(|cp| cp.height()).collect();
                     assert!(
