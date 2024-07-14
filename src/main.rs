@@ -45,8 +45,8 @@ const DB_PATH: &str = ".bdk_kyoto_example.db";
 
 #[derive(Debug, Clone, Subcommand)]
 enum Cmd {
-    /// Sync
-    Sync {
+    /// Scan
+    Scan {
         #[clap(flatten)]
         args: Arg,
     },
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
     match args.command {
         Commands::ChainSpecific(cmd) => {
             match cmd {
-                Cmd::Sync { args } => {
+                Cmd::Scan { args } => {
                     let mut spks = HashSet::new();
 
                     let header_cp = {
