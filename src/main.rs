@@ -1,4 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::runtime::Handle;
 use tokio::task;
@@ -201,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
 
                         let mut client =
                             bdk_kyoto::Client::from_index(chain.tip(), &graph.index, client);
-                        client.set_logger(Box::new(PrintLogger::new()));
+                        client.set_logger(Arc::new(PrintLogger::new()));
                         client
                     };
 
