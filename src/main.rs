@@ -10,15 +10,15 @@ use bdk_chain::bitcoin::{constants, BlockHash, Transaction};
 use bdk_chain::{
     collections::HashSet,
     indexed_tx_graph::{self, IndexedTxGraph},
-    keychain,
+    indexer::keychain_txout,
     local_chain::{self, LocalChain},
     spk_client::FullScanResult,
-    Append, ConfirmationTimeHeightAnchor,
+    ConfirmationBlockTime, Merge,
 };
 
 use example_cli::{
     clap::{self, Args, Subcommand},
-    handle_commands, Commands, Keychain,
+    handle_commands, Commands,
 };
 
 use bdk_kyoto::logger::PrintLogger;
@@ -27,7 +27,7 @@ use bdk_kyoto::{HeaderCheckpoint, TxBroadcast, TxBroadcastPolicy};
 
 type ChangeSet = (
     local_chain::ChangeSet,
-    indexed_tx_graph::ChangeSet<ConfirmationTimeHeightAnchor, keychain::ChangeSet<Keychain>>,
+    indexed_tx_graph::ChangeSet<ConfirmationBlockTime, keychain_txout::ChangeSet>,
 );
 
 /// Peer address whitelist
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
             .graph()
             .all_anchors()
             .iter()
-            .map(|(a, _)| a.confirmation_height)
+            .map(|(a, _)| a.block_id.height)
             .collect();
         (Mutex::new(graph), heights)
     };
@@ -164,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
                                 .last_revealed_index(keychain)
                                 .unwrap_or(TARGET_INDEX);
                             for index in 0..=last_reveal {
-                                let spk = graph.index.spk_at_index(*keychain, index).unwrap();
+                                let spk = graph.index.spk_at_index(keychain, index).unwrap();
                                 spks.insert(spk.to_owned());
                             }
                         }
@@ -225,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
                         let index_changeset =
                             graph.index.reveal_to_target_multi(&last_active_indices);
                         let mut indexed_graph_changeset = graph.apply_update(graph_update);
-                        indexed_graph_changeset.append(index_changeset.into());
+                        indexed_graph_changeset.merge(index_changeset.into());
 
                         db.append_changeset(&(chain_changeset, indexed_graph_changeset))?;
                     }

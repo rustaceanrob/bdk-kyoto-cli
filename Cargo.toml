@@ -14,11 +14,11 @@ tokio = { version = "1.0", default-features = false, features = ["full"] }
 git = "https://github.com/ValuedMammal/bdk-kyoto"
 branch = "deps/chain"
 
-# Use BDK version alpha.13
+# Use BDK version beta.1
 [dependencies.bdk_chain]
 git = "https://github.com/bitcoindevkit/bdk"
-rev = "05438017876c3338d091ca85e52242b455e2193a"
+rev = "17a9850cba06db837b82cef1dbaf2ef1e342f7ec"
 
 [dependencies.example_cli]
 git = "https://github.com/bitcoindevkit/bdk"
-rev = "05438017876c3338d091ca85e52242b455e2193a"
+rev = "17a9850cba06db837b82cef1dbaf2ef1e342f7ec"
